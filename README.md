@@ -1,4 +1,4 @@
-# Enterprise AI Lead Intake & Automated Triage Pipeline
+# AI-Powered Lead Generation WorkFlow Using N8N
 
 An end-to-end event-driven lead qualification and CRM orchestration pipeline. Inbound submissions captured via Google Forms are sanitized, deduplicated, enriched, and qualified via an LLM (Groq Llama 3). The pipeline automatically creates/updates records in HubSpot, alerts internal teams via Slack, and dispatches dynamic, personalized outreach via Gmail.
 

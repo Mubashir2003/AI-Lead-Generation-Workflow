@@ -5,7 +5,7 @@ An end-to-end event-driven lead qualification and CRM orchestration pipeline. In
 
 ## 🏛️ Architecture & Data Flow
 
-![Architecture Diagram](Architecture-Diagram.jpg)
+![Architecture Diagram](assets/Architecture-Diagram.jpg)
 ## 🏗️ Architecture & Data Flow
 
 ```text

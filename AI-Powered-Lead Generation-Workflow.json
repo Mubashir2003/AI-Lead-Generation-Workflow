@@ -1,0 +1,582 @@
+{
+  "name": "Production Lead Intake & AI Triage Workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "lead-intake",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "name": "Webhook Intake",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -1776,
+        224
+      ],
+      "id": "d7860402-bdaf-4c98-af5c-6bdb66f0bbc3",
+      "webhookId": "d63aedab-14f1-4e18-aaac-6cd88a0ab5f8"
+    },
+    {
+      "parameters": {
+        "jsCode": "// 1. Extract & Sanitize Payload\nconst body = $json.body || $json;\nconst email = (body.email || '').trim().toLowerCase();\nconst name = (body.name || '').trim();\nconst company = (body.company || '').trim();\nconst message = (body.message || '').trim();\nconst budget = Number(body.budget) || 0;\n\n// 2. Validation Regex\nconst emailRegex = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/;\n\nif (!email || !emailRegex.test(email) || !name || !message) {\n  return [{\n    json: {\n      isValid: false,\n      errorMessage: 'Validation failed: Missing or invalid required fields (name, email, message)',\n      statusCode: 400\n    }\n  }];\n}\n\n// 3. Domain Classification (Free vs Corporate)\nconst domain = email.split('@')[1];\nconst freeEmailDomains = ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'aol.com', 'mail.com', 'icloud.com'];\nconst isCorporateDomain = !freeEmailDomains.includes(domain);\n\n// 4. Spam / Blacklist Checks\nconst junkKeywords = ['seo ranking', 'backlinks', 'crypto investment', 'guest post outreach', 'casino'];\nconst isSpam = junkKeywords.some(kw => message.toLowerCase().includes(kw));\n\nreturn [{\n  json: {\n    isValid: true,\n    isSpam: isSpam,\n    email,\n    name,\n    company: company || 'Not Provided',\n    message,\n    budget,\n    domain,\n    isCorporateDomain,\n    receivedAt: new Date().toISOString()\n  }\n}];"
+      },
+      "name": "Validate & Sanitize Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1568,
+        224
+      ],
+      "id": "1be54524-db98-4720-ac44-3575b82d1030"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.isValid }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "name": "Is Payload Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -1344,
+        224
+      ],
+      "id": "198a745f-dc5f-4d1c-96f9-79e4da2b2b78"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"status\": \"error\",\n  \"message\": \"{{ $json.errorMessage }}\"\n}",
+        "options": {
+          "responseCode": 400
+        }
+      },
+      "name": "Return 400 Error",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        -1120,
+        432
+      ],
+      "id": "1d29e391-c0e7-477e-a6a0-8820be701f3c"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/contacts/search",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "hubspotAppToken",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"filterGroups\": [\n    {\n      \"filters\": [\n        {\n          \"propertyName\": \"email\",\n          \"operator\": \"EQ\",\n          \"value\": \"{{ $json.email }}\"\n        }\n      ]\n    }\n  ]\n}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "name": "CRM Deduplication Check",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -1120,
+        128
+      ],
+      "id": "3bfd7ca5-1c4c-4002-b274-45695e53a2d1",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "DTzyQosMK9KyZ7AS",
+          "name": "Header Auth account"
+        },
+        "hubspotAppToken": {
+          "id": "9RZ5IF0jsjOx75NX",
+          "name": "HubSpot Service Key account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const searchResult = $input.first().json;\nconst leadData = $('Validate & Sanitize Payload').first().json;\n\nlet existingContactId = null;\nlet isDuplicate = false;\n\nif (searchResult && searchResult.results && searchResult.results.length > 0) {\n  existingContactId = searchResult.results[0].id;\n  isDuplicate = true;\n}\n\nreturn [{\n  json: {\n    ...leadData,\n    isDuplicate,\n    existingContactId\n  }\n}];"
+      },
+      "name": "Format Dedup Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -896,
+        128
+      ],
+      "id": "c0836d46-8012-42df-a727-5f59037ce31c"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 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"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"openai/gpt-oss-20b\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are an enterprise AI lead qualification engine. Analyze the inbound lead and respond strictly with valid JSON conforming to this schema:\\n{\\n  \\\"lead_score\\\": <number 1-10>,\\n  \\\"category\\\": <\\\"Enterprise\\\" | \\\"Mid-Market\\\" | \\\"SMB\\\" | \\\"Spam/Unqualified\\\">,\\n  \\\"intent\\\": <string, concise customer goal>,\\n  \\\"summary\\\": <string, 1-2 sentences>,\\n  \\\"suggested_response_subject\\\": <string>,\\n  \\\"suggested_response_body\\\": <string, personalized, professional outreach email draft>\\n}\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Lead Details:\\n- Name: {{ $json.name }}\\n- Company: {{ $json.company }}\\n- Email Domain: {{ $json.domain }}\\n- Self-Reported Budget: ${{ $json.budget }}\\n- Message: {{ $json.message }}\"\n    }\n  ],\n  \"response_format\": {\"type\": \"json_object\"},\n  \"temperature\": 0.2\n}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "name": "AI Triage & Qualification",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -688,
+        128
+      ],
+      "id": "a7f8ed69-60a7-4d90-ba9c-62e5070d0ea1",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "jsCode": "const leadData = $('Format Dedup Result').first().json;\nconst aiResponse = $input.first().json;\n\nlet aiOutput = {\n  lead_score: 5,\n  category: \"SMB\",\n  intent: \"General Inquiry\",\n  summary: leadData.message.slice(0, 100),\n  suggested_response_subject: \"Thank you for reaching out to us\",\n  suggested_response_body: `Hi ${leadData.name},\\n\\nThank you for reaching out. We received your message regarding: \"${leadData.message}\". A member of our team will review your inquiry and connect with you shortly.\\n\\nBest regards,\\nClient Team`\n};\n\ntry {\n  if (aiResponse && aiResponse.choices && aiResponse.choices[0] && aiResponse.choices[0].message) {\n    const parsed = JSON.parse(aiResponse.choices[0].message.content);\n    aiOutput = { ...aiOutput, ...parsed };\n  }\n} catch (e) {\n  // Fallback used gracefully\n}\n\n// Deterministic Rule Boost / Penalty\nlet finalScore = Number(aiOutput.lead_score) || 5;\nif (leadData.budget >= 10000) finalScore = Math.max(finalScore, 8);\nif (leadData.isCorporateDomain) finalScore = Math.min(10, finalScore + 1);\nif (leadData.isSpam) finalScore = 1;\n\nconst isHighPriority = finalScore >= 8 && !leadData.isSpam;\n\nreturn [{\n  json: {\n    ...leadData,\n    ai: aiOutput,\n    finalScore,\n    isHighPriority\n  }\n}];"
+      },
+      "name": "Merge & Decision Engine",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -464,
+        128
+      ],
+      "id": "76deb992-3cec-4d2a-a7b3-9c946c631a60"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.isDuplicate }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "name": "Check Existing Record",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -240,
+        128
+      ],
+      "id": "e5c2880a-347e-4e93-8b4d-e78d97ab8857"
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://api.hubapi.com/crm/v3/objects/contacts/{{ $json.existingContactId }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer pat-na2-fcd1973b-7f28-4dd7-93ab-65eddae7de89"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"properties\": {\n    \"hs_lead_status\": \"OPEN\",\n    \"jobtitle\": {{ JSON.stringify($('Merge & Decision Engine').first().json.ai ? $('Merge & Decision Engine').first().json.ai.category : \"VIP Lead\") }},\n    \"message\": {{ JSON.stringify($('Validate & Sanitize Payload').first().json.message || \"Updated inquiry received.\") }}\n  }\n}",
+        "options": {}
+      },
+      "name": "Update CRM Record",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        0,
+        0
+      ],
+      "id": "a85273ef-9a9a-48d7-a389-36d5407adf74"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/contacts",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer pat-na2-fcd1973b-7f28-4dd7-93ab-65eddae7de89"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"properties\": {\n    \"email\": {{ JSON.stringify($json.email) }},\n    \"firstname\": {{ JSON.stringify($json.name ? $json.name.split(' ')[0] : \"\") }},\n    \"lastname\": {{ JSON.stringify($json.name ? $json.name.split(' ').slice(1).join(' ') : \"\") }},\n    \"company\": {{ JSON.stringify($json.company || \"\") }},\n    \"hs_lead_status\": \"OPEN\",\n    \"jobtitle\": {{ JSON.stringify($json.ai ? $json.ai.category : \"Inbound Lead\") }},\n    \"message\": {{ JSON.stringify($json.message || \"\") }}\n  }\n}",
+        "options": {}
+      },
+      "name": "Create CRM Record",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        0,
+        240
+      ],
+      "id": "916d4dfe-012f-4e7c-a4cc-3a90ed210fa9"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $('Merge & Decision Engine').first().json.isHighPriority }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "name": "Is High Priority?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        272,
+        128
+      ],
+      "id": "2129c2f1-0c7e-425a-8395-185efff46186"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://hooks.slack.com/services/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",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"text\": \"🚨 *High-Priority Inbound Lead Alert* 🚨\\n*Name:* {{ $('Merge & Decision Engine').first().json.name }}\\n*Company:* {{ $('Merge & Decision Engine').first().json.company }}\\n*Email:* {{ $('Merge & Decision Engine').first().json.email }}\\n*Lead Score:* {{ $('Merge & Decision Engine').first().json.finalScore }}/10 ({{ $('Merge & Decision Engine').first().json.ai.category }})\\n*Intent:* {{ $('Merge & Decision Engine').first().json.ai.intent }}\\n*Summary:* {{ $('Merge & Decision Engine').first().json.ai.summary }}\\n*Recommended Action:* Personalized response queued for dispatch.\"\n}",
+        "options": {}
+      },
+      "name": "Slack High Priority Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        512,
+        0
+      ],
+      "id": "e4e39883-9403-471a-a41c-a67ca65a5685",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "u2CsraOIG4mEQwOQ",
+          "name": "Header Auth account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.resend.com/emails",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"from\": \"Support Team <support@yourdomain.com>\",\n  \"to\": [\"{{ $('Merge & Decision Engine').first().json.email }}\"],\n  \"subject\": \"We received your inquiry - {{ $('Merge & Decision Engine').first().json.company }}\",\n  \"text\": \"Hi {{ $('Merge & Decision Engine').first().json.name }},\\n\\nThank you for reaching out! We have received your inquiry and our team is currently reviewing it. We will get back to you within 24-48 business hours.\\n\\nBest regards,\\nThe Team\"\n}",
+        "options": {}
+      },
+      "name": "Send Standard Email (Resend/Gmail)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        512,
+        240
+      ],
+      "id": "9432e168-1b89-471c-a3fd-fda395eb093e"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"status\": \"success\",\n  \"message\": \"Lead successfully processed\",\n  \"lead_score\": {{ $('Merge & Decision Engine').first().json.finalScore }},\n  \"priority\": \"{{ $('Merge & Decision Engine').first().json.isHighPriority ? 'High' : 'Standard' }}\",\n  \"is_duplicate\": {{ $('Merge & Decision Engine').first().json.isDuplicate }}\n}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "name": "Return 200 Success",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        944,
+        128
+      ],
+      "id": "3ae19d5f-900a-4dc7-829c-18b6b7e545f6"
+    },
+    {
+      "parameters": {},
+      "name": "Global Error Handler",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        -1776,
+        608
+      ],
+      "id": "d494ad31-5d9d-4961-a629-6fe153c8bc03"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://hooks.slack.com/services/YOUR/SLACK/ERROR_WEBHOOK",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"text\": \"⚠️ *Automation Workflow Failure Alert* ⚠️\\n*Workflow:* {{ $workflow.name }}\\n*Execution ID:* {{ $execution.id }}\\n*Failed Node:* {{ $json.execution.lastNodeExecuted }}\\n*Error Message:* {{ $json.execution.error.message }}\"\n}",
+        "options": {}
+      },
+      "name": "Alert Ops on Failure",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -1568,
+        608
+      ],
+      "id": "2d1e84b7-9b0b-4a40-b7ce-41e6db189e5c"
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $('Merge & Decision Engine').first().json.email }}",
+        "subject": "=={{ $('Merge & Decision Engine').first().json.ai ? $('Merge & Decision Engine').first().json.ai.suggested_response_subject : \"Thank you for reaching out\" }}",
+        "emailType": "text",
+        "message": "=={{ $('Merge & Decision Engine').first().json.ai ? $('Merge & Decision Engine').first().json.ai.suggested_response_body : \"Thank you for reaching out to us. We have received your inquiry.\" }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        720,
+        0
+      ],
+      "id": "fb288afc-4a6e-408c-86f7-66324ec1fdd6",
+      "name": "Send a message",
+      "webhookId": "5347726c-49c4-443f-8af2-00d1f34265de",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "IqiGGWagzWolLE3A",
+          "name": "Gmail account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook Intake": {
+      "main": [
+        [
+          {
+            "node": "Validate & Sanitize Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate & Sanitize Payload": {
+      "main": [
+        [
+          {
+            "node": "Is Payload Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Payload Valid?": {
+      "main": [
+        [
+          {
+            "node": "CRM Deduplication Check",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Return 400 Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM Deduplication Check": {
+      "main": [
+        [
+          {
+            "node": "Format Dedup Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Dedup Result": {
+      "main": [
+        [
+          {
+            "node": "AI Triage & Qualification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Triage & Qualification": {
+      "main": [
+        [
+          {
+            "node": "Merge & Decision Engine",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge & Decision Engine": {
+      "main": [
+        [
+          {
+            "node": "Check Existing Record",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Existing Record": {
+      "main": [
+        [
+          {
+            "node": "Update CRM Record",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Create CRM Record",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update CRM Record": {
+      "main": [
+        [
+          {
+            "node": "Is High Priority?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create CRM Record": {
+      "main": [
+        [
+          {
+            "node": "Is High Priority?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is High Priority?": {
+      "main": [
+        [
+          {
+            "node": "Slack High Priority Alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Standard Email (Resend/Gmail)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack High Priority Alert": {
+      "main": [
+        [
+          {
+            "node": "Send a message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Standard Email (Resend/Gmail)": {
+      "main": [
+        [
+          {
+            "node": "Return 200 Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Global Error Handler": {
+      "main": [
+        [
+          {
+            "node": "Alert Ops on Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send a message": {
+      "main": [
+        [
+          {
+            "node": "Return 200 Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "timeSavedMode": "fixed",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "versionId": "149ad6a4-e4bc-4a71-88f2-09284fab37cd",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "a7f3224af22b614feaf29002cb587323d7b0565057f92709c2985b4366377e90"
+  },
+  "nodeGroups": [],
+  "id": "wdS2sKSHDfnzVP9k",
+  "tags": []
+}
